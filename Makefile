@@ -358,7 +358,12 @@ $(BUILD_DIR)/initrd.tar.lz4: $(BUILD_DIR)/initrd.tar
 	lz4 -f -9 --content-size $(BUILD_DIR)/initrd.tar $(BUILD_DIR)/initrd.tar.lz4
 	@printf "$(GREEN)[OK]$(RESET) LZ4 compressed initrd created: $(BUILD_DIR)/initrd.tar.lz4\n"
 
-$(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar.lz4 base/boot/limine.conf limine-setup
+$(BUILD_DIR)/rootfs.img: $(BUILD_DIR)/initrd.tar
+	$(call PRINT_STEP,Building EXT4 rootfs...)
+	truncate -s 256M $(BUILD_DIR)/rootfs.img
+	mkfs.ext4 -O ^64bit,^metadata_csum -b 4096 -d $(BUILD_DIR)/initrd $@
+
+$(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar.lz4 $(BUILD_DIR)/rootfs.img base/boot/limine.conf limine-setup
 	$(call PRINT_STEP,CREATING ISO IMAGE)
 	@printf "$(YELLOW)[ISO]$(RESET) Cleaning previous ISO root...\n"
 	rm -rf $(ISO_DIR)
@@ -369,22 +374,14 @@ $(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar.lz4 base/boot/limine.conf li
 	
 	@printf "$(YELLOW)[COPY]$(RESET) Kernel ELF...\n"
 	cp $(KERNEL_ELF) $(ISO_DIR)/
-
-	@printf "$(YELLOW)[COPY]$(RESET) Limine config...\n"
 	cp base/boot/limine.conf $(ISO_DIR)/
-	
-	@printf "$(YELLOW)[COPY]$(RESET) Initrd...\n"
 	cp $(BUILD_DIR)/initrd.tar.lz4 $(ISO_DIR)/
-
-	@printf "$(YELLOW)[COPY]$(RESET) Optional splash image...\n"
-	@if [ -f base/boot/splash.jpg ]; then printf "  -> splash.jpg\n"; cp base/boot/splash.jpg $(ISO_DIR)/splash.jpg; else printf "  -> no splash.jpg found\n"; fi
 	
-	@printf "$(YELLOW)[COPY]$(RESET) Limine boot files...\n"
+	@if [ -f base/boot/splash.jpg ]; then cp base/boot/splash.jpg $(ISO_DIR)/splash.jpg; fi
+	
 	cp limine/limine-bios.sys $(ISO_DIR)/
 	cp limine/limine-bios-cd.bin $(ISO_DIR)/
 	cp limine/limine-uefi-cd.bin $(ISO_DIR)/
-	
-	@printf "$(YELLOW)[COPY]$(RESET) EFI bootloaders...\n"
 	cp limine/BOOTX64.EFI $(ISO_DIR)/EFI/BOOT/
 	cp limine/BOOTIA32.EFI $(ISO_DIR)/EFI/BOOT/
 
@@ -392,9 +389,12 @@ $(ISO_IMAGE): $(KERNEL_ELF) $(BUILD_DIR)/initrd.tar.lz4 base/boot/limine.conf li
 	$(XORRISO) -as mkisofs -R -J -b limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
+		--protective-msdos-label \
+		-partition_offset 16 \
+		-append_partition 2 0x83 $(BUILD_DIR)/initrd.tar.lz4 \
+		-append_partition 3 0x83 $(BUILD_DIR)/rootfs.img \
 		$(ISO_DIR) -o $(ISO_IMAGE)
-	
+
 	@printf "$(YELLOW)[LIMINE]$(RESET) Installing BIOS bootloader...\n"
 	./limine/limine bios-install $(ISO_IMAGE)
 	@printf "$(GREEN)[OK]$(RESET) ISO image ready: $(ISO_IMAGE)\n"
@@ -508,16 +508,21 @@ run-hd-mac: disk.qcow2 $(OVMF_VARS)
 
 run-linux: $(ISO_IMAGE) disk.qcow2
 	$(call PRINT_STEP,RUNNING BOREDOS IN QEMU ON LINUX)
-	qemu-system-x86_64 -m 4G -serial stdio -cdrom $< -boot d \
-	    -smp 4 \
+	qemu-system-x86_64 -m 4G -serial stdio \
+		-smp 4 \
 		-audiodev pa,id=audio0 -machine pcspk-audiodev=audio0 \
 		-device AC97,audiodev=audio0 \
 		-vga std -global VGA.xres=1920 -global VGA.yres=1080 \
-		-display gtk,show-cursor=off \
-		-device ahci,id=ahci -drive file=disk.qcow2,format=qcow2,if=none,id=disk0 -device ide-hd,bus=ahci.0,drive=disk0 \
-		-cpu max
+		-display sdl \
+		-device ahci,id=ahci \
+		-drive file=disk.qcow2,format=qcow2,if=none,id=disk0 \
+		-device ide-hd,bus=ahci.0,drive=disk0 \
+		-device qemu-xhci,id=xhci \
+		-drive id=usb-disk,file=$(ISO_IMAGE),format=raw,if=none \
+		-device usb-storage,drive=usb-disk,bootindex=1 \
+		-device usb-kbd,bus=xhci.0 \
+		-cpu host -accel kvm
 
-		
 run-hd-windows: disk.qcow2
 	$(call PRINT_STEP,BOOTING BOREDOS FROM HARD DRIVE ON WINDOWS)
 	qemu-system-x86_64 -m 4G -serial stdio -boot c \

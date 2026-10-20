@@ -260,7 +260,6 @@ static int usb_disk_write_sectors(Disk *disk, uint32_t sector, uint32_t count, c
 
 static int usb_disk_sync(Disk *disk) {
     (void)disk;
-    serial_write("[USBMS] Disk sync called (unimplemented!)\n");
     return 0;
 }
 

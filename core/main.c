@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <ext4.h>
 #include "limine.h"
 #include "graphics.h"
 #include "gdt.h"
@@ -283,6 +284,8 @@ static void boot_parse_cmdline(const char *cmdline, uint32_t media_type) {
 
     cmdline_read_value(cmdline, "init=", g_boot_init_path, sizeof(g_boot_init_path));
 
+    log_ok("Checking root drive");
+
     char root_arg[32];
     if (cmdline_read_value(cmdline, "root=", root_arg, (int)sizeof(root_arg))) {
         const char *dev = root_arg;
@@ -294,6 +297,8 @@ static void boot_parse_cmdline(const char *cmdline, uint32_t media_type) {
             g_boot_root_device[i] = dev[i];
             i++;
         }
+
+        log_ok("Root drive detected!");
         g_boot_root_device[i] = '\0';
         if (i > 0) g_boot_flags |= BOOT_FLAG_ROOT_SET;
     }
@@ -556,6 +561,17 @@ static void init_subsystems(void) {
     vfs_mount("/proc", "procfs", "procfs", procfs_get_ops(), NULL);
 }
 
+static volatile spinlock_t g_lwext4_global_lock;
+static uint64_t saved_flags = 0;
+
+static void lwext4_global_lock_wrapper(void) {
+    saved_flags = spinlock_acquire_irqsave(&g_lwext4_global_lock);
+}
+
+static void lwext4_global_unlock_wrapper(void) {
+    spinlock_release_irqrestore(&g_lwext4_global_lock, saved_flags);
+}
+
 static void init_rootfs(void) {
     if (kernel_file_request.response != NULL && kernel_file_request.response->kernel_file != NULL) {
         const char *cmdline = kernel_file_request.response->kernel_file->cmdline;
@@ -565,6 +581,8 @@ static void init_rootfs(void) {
         boot_parse_cmdline(NULL, LIMINE_MEDIA_TYPE_GENERIC);
     }
 
+    serial_write("[INIT] Mounting tmpfs\n");
+
     tmpfs_init();
     vfs_mount("/", "tmpfs", "tmpfs", tmpfs_get_ops(), NULL);
 
@@ -572,12 +590,16 @@ static void init_rootfs(void) {
         void *vol = NULL; const char *fs_type = NULL; vfs_fs_ops_t *ops = NULL;
         Disk *d = disk_get_by_name(g_boot_root_device);
 
-        int total = disk_get_count();
-        for (int i = 0; !vol && i < total + (d ? 1 : 0); i++) {
-            Disk *cand = d ? d : disk_get_by_index(i);
-            if (d) d = NULL;
-            if (!cand || !cand->is_partition || cand->is_esp) continue;
-        }
+        serial_write("[INIT] Found disk: ");
+        serial_write_hex((uint64_t)d);
+        serial_write("\n");
+
+        // int total = disk_get_count();
+        // for (int i = 0; !vol && i < total + (d ? 1 : 0); i++) {
+        //     Disk *cand = d ? d : disk_get_by_index(i);
+        //     if (d) d = NULL;
+        //     if (!cand || !cand->is_partition || cand->is_esp) continue;
+        // }
 
         if (d) {
             extern void *ext4fs_mount_volume(Disk *d);
@@ -586,15 +608,25 @@ static void init_rootfs(void) {
             extern struct vfs_fs_ops *fat32_get_realfs_ops(void);
 
             if (!d->is_fat32) {
+                serial_write("[INIT] Attempting EXT4 mount\n");
                 vol = ext4fs_mount_volume(d);
+                struct ext4_lock fs_locks = {
+                    .lock = lwext4_global_lock_wrapper,
+                    .unlock = lwext4_global_unlock_wrapper
+                };
+
                 if (vol) {
+                    serial_write("[INIT] Mounted as EXT4\n");
                     fs_type = "ext4";
+                    ext4_mount_setup_locks("/", &fs_locks);
                     ops = ext4fs_get_ops();
                 }
             }
             if (!vol) {
+                serial_write("[INIT] Attempting mount as FAT32\n");
                 vol = fat32_mount_volume(d);
                 if (vol) {
+                    serial_write("[INIT] Mounted on FAT32\n");
                     fs_type = "fat32";
                     ops = (vfs_fs_ops_t *)fat32_get_realfs_ops();
                 }
@@ -821,5 +853,4 @@ void kmain(void) {
 
     extern void work_queue_drain_loop(void);
     work_queue_drain_loop();
-
 }

@@ -1553,6 +1553,11 @@ void *fat32_mount_volume(void *disk_ptr) {
     
     kfree_null(vol);
     spinlock_release_irqrestore(&fat32_subsystem_lock, flags);
+
+    serial_write("[FAT32] mount failed for ");
+    serial_write(disk->devname);
+    serial_write("\n");
+
     return NULL;
 }
 
